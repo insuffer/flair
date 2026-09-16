@@ -543,21 +543,37 @@ export class BootstrapMemories extends Resource {
     const soulMaxTokens = Math.floor(maxTokens * 0.4); // 40% of budget for soul
     if (includeSoul) {
       let soulTokens = 0;
-      const soulEntries: { key: string; value: unknown; line: string; tokens: number; priority: number }[] = [];
-
+      // flair#1431 — de-duplicate soul records by key BEFORE admission. A Soul
+      // table carrying stale duplicates for the same key (identity written
+      // repeatedly by pre-upsert writers) otherwise ships the SAME identity
+      // body once per duplicate — "identity, three times" in the #1431
+      // payload — and double-spends the soul budget against task recall. The
+      // NEWEST record per key (updatedAt, falling back to createdAt) is the
+      // current value; older duplicates are dropped. `skill-assignment` is
+      // exempt (collected above): multiple assignments per key are legitimate.
+      const newestSoulByKey = new Map<string, { key: string; value: unknown; record: any; line: string; tokens: number; priority: number }>();
       for await (const record of (databases as any).flair.Soul.search()) {
         if (record.agentId !== agentId) continue;
         if (record.key === "skill-assignment") {
           skillAssignments.push(record);
           continue;
         }
+        const stamp = Date.parse(record.updatedAt ?? record.createdAt ?? "") || 0;
+        const prev = newestSoulByKey.get(record.key);
+        if (prev && stamp <= (Date.parse(prev.record.updatedAt ?? prev.record.createdAt ?? "") || 0)) continue;
         const line = `**${record.key}:** ${record.value}`;
-        const tokens = estimateTokens(line);
-        const priority = SOUL_KEY_PRIORITY[record.key] ?? 50;
-        soulEntries.push({ key: record.key, value: record.value, line, tokens, priority });
+        newestSoulByKey.set(record.key, {
+          key: record.key,
+          value: record.value,
+          record,
+          line,
+          tokens: estimateTokens(line),
+          priority: SOUL_KEY_PRIORITY[record.key] ?? 50,
+        });
       }
 
       // Sort by priority (lower = more important)
+      const soulEntries = [...newestSoulByKey.values()];
       soulEntries.sort((a, b) => a.priority - b.priority);
 
       // flair#1371 — the structured `soul` map follows the admission decision.

@@ -846,3 +846,72 @@ describe("MemoryBootstrap.post() — org-event watermark path (flair#931)", () =
     expect(ids).not.toContain("before-boot");
   });
 });
+
+
+describe("soul de-duplication (#1431)", () => {
+  const NEW_DATE = "2026-09-01T00:00:00Z";
+  const MID_DATE = "2026-06-01T00:00:00Z";
+
+  it("ships ONE entry per soul key — the newest duplicate wins (#1431: 'identity, three times')", async () => {
+    reset();
+    const agentId = "soul-dedup";
+    soulStore.set(`${agentId}:identity-old`, { id: `${agentId}:identity-old`, agentId, key: "identity", value: "IDENTITY-BODY-OLD", createdAt: OLD_DATE, updatedAt: OLD_DATE });
+    soulStore.set(`${agentId}:identity-mid`, { id: `${agentId}:identity-mid`, agentId, key: "identity", value: "IDENTITY-BODY-MID", createdAt: MID_DATE, updatedAt: MID_DATE });
+    soulStore.set(`${agentId}:identity-new`, { id: `${agentId}:identity-new`, agentId, key: "identity", value: "IDENTITY-BODY-NEW", createdAt: NEW_DATE, updatedAt: NEW_DATE });
+    soulStore.set(`${agentId}:uc-1`, { id: `${agentId}:uc-1`, agentId, key: "user-context", value: "USER-CONTEXT-FIRST", createdAt: OLD_DATE, updatedAt: OLD_DATE });
+    soulStore.set(`${agentId}:uc-2`, { id: `${agentId}:uc-2`, agentId, key: "user-context", value: "USER-CONTEXT-NEWEST", createdAt: NEW_DATE, updatedAt: NEW_DATE });
+    soulStore.set(`${agentId}:sk-1`, { id: `${agentId}:sk-1`, agentId, key: "skill-assignment", value: "SKILL-ALPHA", priority: "high", createdAt: OLD_DATE });
+    soulStore.set(`${agentId}:sk-2`, { id: `${agentId}:sk-2`, agentId, key: "skill-assignment", value: "SKILL-BETA", priority: "standard", createdAt: OLD_DATE });
+    const b = makeBootstrap(agentCtx(agentId));
+    const res: any = await b.post({ agentId, maxTokens: 4000 });
+
+    // The payload ships each key exactly once — not once per stale duplicate.
+    expect((res.context.match(/\*\*identity:\*\*/g) || []).length).toBe(1);
+    expect((res.context.match(/\*\*user-context:\*\*/g) || []).length).toBe(1);
+    // The NEWEST record wins; stale duplicates do not ship.
+    expect(res.context).toContain("IDENTITY-BODY-NEW");
+    expect(res.context).not.toContain("IDENTITY-BODY-OLD");
+    expect(res.context).not.toContain("IDENTITY-BODY-MID");
+    expect(res.context).toContain("USER-CONTEXT-NEWEST");
+    expect(res.context).not.toContain("USER-CONTEXT-FIRST");
+    // The structured soul map follows the deduped admission (newest value).
+    expect(res.soul.identity).toBe("IDENTITY-BODY-NEW");
+    expect(res.soul["user-context"]).toBe("USER-CONTEXT-NEWEST");
+    // skill-assignment is multi-value by design — dedup must not collapse it.
+    expect(res.context).toContain("SKILL-ALPHA");
+    expect(res.context).toContain("SKILL-BETA");
+  });
+
+  it("differential + negative control hold with duplicate soul keys present (issue Check)", async () => {
+    reset();
+    const agentId = "dedup-diff";
+    soulStore.set(`${agentId}:identity-a`, { id: `${agentId}:identity-a`, agentId, key: "identity", value: "Release engineer (dup a)", createdAt: OLD_DATE, updatedAt: OLD_DATE });
+    soulStore.set(`${agentId}:identity-b`, { id: `${agentId}:identity-b`, agentId, key: "identity", value: "Release engineer (dup b)", createdAt: NEW_DATE, updatedAt: NEW_DATE });
+    for (let i = 0; i < 40; i++) memoryStore.set(`pin-${i}`, {
+      id: `pin-${i}`, agentId, content: "Standing principle. ".repeat(20),
+      durability: "permanent", createdAt: OLD_DATE,
+    });
+    const otherVector = [0, 1, ...Array(126).fill(0)];
+    taskEmbedding = (text: string) => (text === "release" ? FAKE_EMBEDDING : otherVector);
+    for (const [id, embedding] of [["release", FAKE_EMBEDDING], ["backup", otherVector]] as const) {
+      memoryStore.set(id, { id, agentId, content: `${id} essential fact. `.repeat(28), durability: "standard", createdAt: OLD_DATE, embedding });
+    }
+    const b = makeBootstrap(agentCtx(agentId));
+    const args = { agentId, maxTokens: 1500 };
+    const release = await b.post({ ...args, currentTask: "release" });
+    const backup = await b.post({ ...args, currentTask: "backup" });
+    // Identity content is identical across tasks (and deduped); the
+    // task-selected portion is NOT.
+    expect(release.context).toContain("Release engineer (dup b)");
+    expect((release.context.match(/Release engineer \(dup /g) || []).length).toBe(1);
+    expect(release.memories.some((m: any) => m.id === "release")).toBe(true);
+    expect(backup.memories.some((m: any) => m.id === "backup")).toBe(true);
+    expect(release.memories.map((m: any) => m.id)).not.toEqual(backup.memories.map((m: any) => m.id));
+    // Negative control: no currentTask → pinned payload unchanged, no task section.
+    const noTask = await b.post(args);
+    expect(noTask.sections.relevant).toBe(0);
+    expect(noTask.sections.permanent).toBeGreaterThan(0);
+    expect(noTask.context).toContain("Release engineer (dup b)");
+    expect((noTask.context.match(/\*\*identity:\*\*/g) || []).length).toBe(1);
+  });
+});
