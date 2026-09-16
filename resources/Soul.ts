@@ -3,6 +3,7 @@ import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 import { localInstanceId } from "./instance-identity.js";
 import { makeAuthGate, stampAttribution } from "./record-type-kit.js";
 import { RECORD_TYPES } from "./record-types.js";
+import { refuseNonDurableSkillSource } from "./skill-assignment.js";
 import { authorizeSoulWrite, refuseSoulWriteContent, soulProvenance } from "./soul-write-policy.js";
 
 // Source authorization is independent of principal ownership: an admin runtime
@@ -44,6 +45,10 @@ export class Soul extends (databases as any).flair.Soul {
     // Learned artifacts cannot gain identity authority through an operator write.
     const learnedDenied = await refuseSoulWriteContent(content);
     if (learnedDenied) return learnedDenied;
+    // flair#1433 — a skill-assignment whose metadata.source is a temp path
+    // must fail at registration, naming the path. Other Soul keys are a no-op.
+    const sourceDenied = refuseNonDurableSkillSource(content);
+    if (sourceDenied) return sourceDenied;
     content.durability ||= "permanent";
     content.createdAt = new Date().toISOString();
     content.updatedAt = content.createdAt;
@@ -75,8 +80,11 @@ export class Soul extends (databases as any).flair.Soul {
         headers: { "Content-Type": "application/json" },
       });
     }
-    const learnedDenied = await refuseSoulWriteContent({ ...existing, ...content });
+    const merged = { ...existing, ...content };
+    const learnedDenied = await refuseSoulWriteContent(merged);
     if (learnedDenied) return learnedDenied;
+    const sourceDenied = refuseNonDurableSkillSource(merged);
+    if (sourceDenied) return sourceDenied;
     return super.patch(content, query);
   }
 
@@ -85,6 +93,8 @@ export class Soul extends (databases as any).flair.Soul {
     if (denied) return denied;
     const learnedDenied = await refuseSoulWriteContent(content);
     if (learnedDenied) return learnedDenied;
+    const sourceDenied = refuseNonDurableSkillSource(content);
+    if (sourceDenied) return sourceDenied;
     const ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (ownerDenial) return ownerDenial;
     content.updatedAt = new Date().toISOString();

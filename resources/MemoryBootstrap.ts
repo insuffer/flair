@@ -3,6 +3,7 @@ import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
 import { getEmbedding } from "./embeddings-provider.js";
 import { wrapUntrusted } from "./content-safety.js";
 import { isTeammate, formatTeamLine, isZeroRowNoOpEvent } from "./memory-bootstrap-lib.js";
+import { formatActiveSkillLines } from "./skill-assignment.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 import { isValidEntity } from "./entity-vocab.js";
 import { withDetachedTxn } from "./table-helpers.js";
@@ -588,36 +589,12 @@ export class BootstrapMemories extends Resource {
       }
     }
 
-    // --- 1b. Skill assignments (ordered by priority, conflict detection) ---
+    // --- 1b. Skill assignments (durable source + stated conflict outcome) ---
+    // flair#1433 — do not record scratch paths as provenance, and do not
+    // report-and-load-both on SKILL_CONFLICT. Resolution lives in
+    // skill-assignment.ts so the outcome is unit-tested without Harper.
     if (skillAssignments.length > 0) {
-      const priorityOrder: Record<string, number> = { critical: 0, high: 1, standard: 2, low: 3 };
-      skillAssignments.sort((a, b) => {
-        const pa = priorityOrder[a.priority ?? "standard"] ?? 2;
-        const pb = priorityOrder[b.priority ?? "standard"] ?? 2;
-        return pa - pb;
-      });
-
-      // Detect conflicts at same priority level
-      const byPriority = new Map<string, any[]>();
-      for (const skill of skillAssignments) {
-        const p = skill.priority ?? "standard";
-        if (!byPriority.has(p)) byPriority.set(p, []);
-        byPriority.get(p)!.push(skill);
-      }
-
-      for (const skill of skillAssignments) {
-        const p = skill.priority ?? "standard";
-        let meta: any = {};
-        try { meta = typeof skill.metadata === "string" ? JSON.parse(skill.metadata) : (skill.metadata ?? {}); } catch {}
-        const source = meta.source ? `, source: ${meta.source}` : "";
-        let line = `- ${skill.value} (${p} priority${source})`;
-        // Flag conflicts at same priority level
-        const peers = byPriority.get(p) ?? [];
-        if (peers.length > 1) {
-          line += " [SKILL_CONFLICT]";
-        }
-        sections.skills.push(line);
-      }
+      sections.skills.push(...formatActiveSkillLines(skillAssignments));
     }
 
     // --- 1c. Team roster + cross-agent search nudge ---
