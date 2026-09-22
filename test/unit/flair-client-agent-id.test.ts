@@ -86,6 +86,25 @@ describe("flair-client agent identity (flair#1816)", () => {
     expect(r.stderr).toContain("--agent requires a value");
   });
 
+  // The parser removes exactly one flag pair. A second `--agent` used to
+  // survive the splice and land in the written content ("hello --agent flint"),
+  // which is the flag-folding class extractFlags already refuses everywhere
+  // else — a flag that stops being an instruction and becomes data.
+  it("NEGATIVE: rejects a repeated --agent instead of folding it into content", async () => {
+    const r = await runClient([
+      "memory",
+      "write",
+      "hello",
+      "--agent",
+      "anvil",
+      "--agent",
+      "flint",
+    ]);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("--agent may only be given once");
+    expect(r.stderr).not.toContain("no private key found");
+  });
+
   it("POSITIVE: --agent passes the guard and names that agent at the key load", async () => {
     const r = await runClient(["memory", "write", "hello", "--agent", "anvil"]);
     expect(r.exitCode).toBe(1); // no key in the empty temp dir, as designed

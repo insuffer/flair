@@ -121,6 +121,13 @@ if (agentFlagIndex !== -1) {
     process.exit(1);
   }
   rest.splice(agentFlagIndex, 2);
+  // One removal is not a loop: a second `--agent` would survive into the
+  // positional join and land in the written content — the same flag-folding
+  // class extractFlags exists to prevent. Refuse instead (flair#1816 review).
+  if (rest.includes('--agent')) {
+    console.error('--agent may only be given once');
+    process.exit(1);
+  }
 }
 if (!process.env.FLAIR_AGENT_ID && !agentFromFlag && MUTATING_ACTIONS.has(action)) {
   console.error(
